@@ -6,7 +6,8 @@ namespace Arch.System.SourceGenerator;
 
 [Generator]
 public class SourceGenerator : IIncrementalGenerator
-{    public void Initialize(IncrementalGeneratorInitializationContext context)
+{
+    public void Initialize(IncrementalGeneratorInitializationContext context)
     {
         // filter down to the assembly class so we don't re-evaluate
         var world = context.CompilationProvider
