@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <TargetFrameworks>net7.0;net6.0;netstandard2.1</TargetFrameworks>
+        <LangVersion>11</LangVersion>
+
+        <GenerateDocumentationFile>true</GenerateDocumentationFile>
+        <DocumentationFile>bin\$(Configuration)\$(TargetFramework)\$(AssemblyName).xml</DocumentationFile>
+        <IncludeSymbols>true</IncludeSymbols>
+        <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+        
+        <Title>Arch.Scheduled</Title>
+        <Description>Automatic-dependency job manager for Arch.</Description>
+        <Copyright>Apache2.0</Copyright>
+        <PackageProjectUrl>https://github.com/genaray/Arch.Extended</PackageProjectUrl>
+        <RepositoryUrl>https://github.com/genaray/Arch.Extended.git</RepositoryUrl>
+        <RepositoryType>git</RepositoryType>
+        <PackageTags>c#;.net;.net6;.net7;ecs;game;entity;gamedev; game-development; game-engine; entity-component-system; arch;</PackageTags>
+        <PackageReleaseNotes></PackageReleaseNotes>
+        <Authors>genaray</Authors>
+        <Version>0.0.1</Version>
+
+        <UnityPublish>true</UnityPublish>
+    </PropertyGroup>
+
+    <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
+      <DefineConstants>TRACE;EVENTS</DefineConstants>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <PackageReference Include="Arch" Version="1.2.6.6-alpha" />
+    </ItemGroup>
+	
+	<ItemGroup>
+		<ProjectReference Include="..\Arch.Scheduled.SourceGenerator\Arch.Scheduled.SourceGenerator.csproj"
+						  OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+	</ItemGroup>
+
+
+</Project>
