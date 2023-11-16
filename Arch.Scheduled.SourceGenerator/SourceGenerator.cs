@@ -1,5 +1,6 @@
 ﻿using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
+using System.Linq;
 using System.Text;
 
 namespace Arch.System.SourceGenerator;
@@ -23,23 +24,200 @@ public class SourceGenerator : IIncrementalGenerator
                 var world = archSymbol.GlobalNamespace
                     .GetNamespaceMembers().First(q => q.Name == "Arch")
                     .GetNamespaceMembers().First(q => q.Name == "Core")
-                    .GetTypeMembers().First(q => q.Name == "World");
+                    .GetTypeMembers();
                 return world;
             });
 
-        context.RegisterSourceOutput(world, (ctx, world) =>
+        context.RegisterSourceOutput(world, (ctx, types) =>
         {
-            var wrapper = GenerateWorldWrapper(world);
+            var world = types.First(q => q.Name == "World");
+            var queryDescription = types.First(q => q.Name == "QueryDescription");
 
-            ctx.AddSource("ScheduledWorld.Wrapper.g.cs", CSharpSyntaxTree.ParseText(wrapper).GetRoot().NormalizeWhitespace().ToFullString());
+            ctx.AddSource("ScheduledWorld.Wrapper.g.cs",
+                CSharpSyntaxTree.ParseText(GenerateWorldWrapper(world)).GetRoot().NormalizeWhitespace().ToFullString());
+            ctx.AddSource("ScheduledQueryDescription.Variadics.g.cs",
+                CSharpSyntaxTree.ParseText(GenerateQueryDescriptionVariadics()).GetRoot().NormalizeWhitespace().ToFullString());
+            ctx.AddSource("ScheduledQueryDescription.Wrapper.g.cs",
+                CSharpSyntaxTree.ParseText(GenerateQueryDescriptionWrapper(queryDescription)).GetRoot().NormalizeWhitespace().ToFullString());
         });
+    }
+
+    private string GenerateQueryDescriptionVariadics()
+    {
+        // naive variadics for WithRead/WithWrite. A proper variadic implementation would be better.
+        StringBuilder methods = new();
+        foreach (string method in new string[] { "Reads", "Writes" })
+        {
+            StringBuilder generics = new();
+            for (int i = 0; i < 25; i++)
+            {
+                if (generics.Length != 0)
+                {
+                    generics.Append(", ");
+                }
+                generics.Append($"T{i}");
+                // only start at 2 generics
+                if (i == 0)
+                {
+                    continue;
+                }
+                methods.AppendLine($$"""
+                    <inheritdoc cref="With{{method}}<T>"/>
+                    [UnscopedRef]
+                    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+                    public ref ScheduledQueryDescription With{{method}}<{{generics}}>()
+                    {
+                        {{method}} = Arch.Core.Group<{{generics}}>.Types;
+                        return ref this;
+                    }
+                    """);
+            }
+        }
+
+        return $$"""
+            public partial struct ScheduledQueryDescription
+            {
+                {{methods}}
+            }
+            """;
+    }
+
+    private string GenerateQueryDescriptionWrapper(INamedTypeSymbol queryDescription)
+    {
+        // much simpler than World.... only override With____ methods
+        var methods = queryDescription.GetMembers().OfType<IMethodSymbol>().Where(symbol => symbol.Name.StartsWith("With"));
+
+        StringBuilder wrappedMethods = new();
+        foreach (var method in methods)
+        {
+            string name = method.Name;
+            string generics = string.Join(", ", method.TypeParameters.Select(t => t.Name));
+
+            wrappedMethods.AppendLine($$"""
+                <inheritdoc cref="Arch.Core.QueryDescription.{{method.Name}}"/>
+                [UnscopedRef]
+                [MethodImpl(MethodImplOptions.AggressiveInlining)]
+                public ref ScheduledQueryDescription {{method.Name}}<{{generics}}>()
+                {
+                    Inner = Inner.{{method.Name}}<{{generics}}>();
+                    return ref this;
+                }
+                """);
+        }
+
+        return $$"""
+            public partial struct ScheduledQueryDescription
+            {
+                {{wrappedMethods}}
+            }
+            """;
+    }
+
+    private enum MemberHandling
+    {
+        // no modifiers, just wrap
+        Wrap,
+        // adds query guards
+        GenericQuery,
+        // adds scheduled query guards
+        GenericScheduledQuery,
+        // excludes from wrap; forces use of UnsafeWorld
+        Exclude,
+        StructuralChange
+    }
+
+    private struct MemberInfo
+    {
+        public MemberHandling Handling = MemberHandling.Exclude;
+        public string Name = string.Empty;
+        public bool Static = false;
+        public int? ParamCount = null; // if null, matches any param count
+        public MemberInfo() { }
     }
 
     private string GenerateWorldWrapper(INamedTypeSymbol world)
     {
-        var members = world.GetMembers()
-            .Where(m => m.DeclaredAccessibility == Accessibility.Public);
+        // These methods are excluded from wrapping; we either make custom overrides in the actual assembly, or
+        // we can't make them safe.
 
+        MemberInfo[] specialMembers =
+        {
+            new() { Name = "Create", Static = true },
+            new() { Name = "Destroy", Static = true },
+            new() { Name = "Worlds", Static = true },
+            new() { Name = "InlineParallelChunkQuery" },
+            // the default 1 param query returns a Query struct, which we don't support. (what if they store the query and use it later?)
+            new() { Name = "Query", ParamCount = 1 },
+            // it is invalid to use GetEntities because anything you can do with them is invalid. (what if you read a component but haven't declared the read?)
+            // same with these others. The user should use UnsafeWorld and declare their reads.
+            new() { Name = "GetEntities" },
+            new() { Name = "GetChunks" },
+            new() { Name = "GetChunk" },
+
+            // Most non-structural accessors are invalid beacause this would be reading undeclared things.
+            // TODO: we can definitely enable these with some trickery; we just have to declare the read immediately and define a context if within scheduled query.
+            // The issue here is non-generics and thread assurance.
+            new() { Name = "Get" },
+            new() { Name = "TryGet" },
+            new() { Name = "TryGetRef" },
+            new() { Name = "GetRange" },
+            new() { Name = "GetAllComponents" },
+            new() { Name = "GetAllComponents" },
+
+            // CountEntities works, but we have to treat it as a query
+            new() { Name = "CountEntities", Handling = MemberHandling.GenericQuery },
+            new() { Name = "Query", Handling = MemberHandling.GenericQuery },
+            new() { Name = "InlineQuery", Handling = MemberHandling.GenericQuery },
+            new() { Name = "InlineEntityQuery", Handling = MemberHandling.GenericQuery },
+            new() { Name = "ParallelQuery", Handling = MemberHandling.GenericScheduledQuery },
+            new() { Name = "InlineParallelQuery", Handling = MemberHandling.GenericScheduledQuery },
+            new() { Name = "InlineParallelEntityQuery", Handling = MemberHandling.GenericScheduledQuery },
+        };
+
+
+        var members = world.GetMembers()
+            .Where(m => m.DeclaredAccessibility == Accessibility.Public)
+            // Map the members to their handling
+            .Select(m =>
+            {
+                foreach (var info in specialMembers)
+                {
+                    // If this isn't us, we keep looking
+                    if (info.Name != m.Name)
+                    {
+                        continue;
+                    }
+
+                    // If we don't match the static constraint, this isn't us
+                    if (info.Static != m.IsStatic)
+                    {
+                        continue;
+                    }
+
+                    // If there's a param constraint and we're a property, this isn't us
+                    if (info.ParamCount is not null && m is IPropertySymbol)
+                    {
+                        continue;
+                    }
+
+                    // If we don't match the param constraint, this isn't us
+                    if (info.ParamCount is not null && m is IMethodSymbol method && method.Parameters.Length != info.ParamCount)
+                    {
+                        continue;
+                    }
+
+                    // we found a matching handling, so use that
+                    return (m, info.Handling);
+                }
+
+                // We didn't find a matching handling override, so either wrap or structural change, based on attr.
+                if (m.GetAttributes().Any(attrData => attrData.AttributeClass?.Name == "StructuralChangesAttribute"))
+                {
+                    return (m, MemberHandling.StructuralChange);
+                }
+                return (m, MemberHandling.Wrap);
+            })
+            .Where(tu => tu.Item2 != MemberHandling.Exclude);
 
         // This does ***NOT*** (yet) support: 
         // - readonly (structs)
@@ -52,14 +230,14 @@ public class SourceGenerator : IIncrementalGenerator
         StringBuilder wrappedMembers = new();
 
         // getters/setters
-        foreach (var property in members.OfType<IPropertySymbol>())
+        foreach (var (property, handling) in members.OfType<(IPropertySymbol, MemberHandling)>())
         {
             if (property.IsIndexer) throw new NotImplementedException();
 
-            wrappedMembers.AppendLine(WrapProperty(property));
+            wrappedMembers.AppendLine(WrapProperty(property, handling));
         }
 
-        foreach (var method in members.OfType<IMethodSymbol>())
+        foreach (var (method, handling) in members.OfType<(IMethodSymbol, MemberHandling)>())
         {
             // skip ToString() because we override that manually
             if (method.Name == "ToString" && method.IsOverride)
@@ -71,21 +249,17 @@ public class SourceGenerator : IIncrementalGenerator
 
             if (method.MethodKind == MethodKind.Ordinary)
             {
-                wrappedMembers.AppendLine(WrapMethod(method));
+                wrappedMembers.AppendLine(WrapMethod(method, handling));
             }
         }
 
         return $$"""
             using Arch.Core;
+            using System.Runtime.CompilerServices;
+            using System.Diagnostics.Contracts;
             partial class ScheduledWorld
             {
-                public World UnsafeWorld { get; }
-
-                // TODO: use ScheduledWorld.Create();
-                public ScheduledWorld()
-                {
-                    UnsafeWorld = World.Create();
-                }
+                public World UnsafeWorld { [MethodImpl(MethodImplOptions.AggressiveInlining)] get; }
 
                 // custom override since we don't support other overrides
                 public override string ToString()
@@ -98,7 +272,7 @@ public class SourceGenerator : IIncrementalGenerator
             """;
     }
 
-    private string WrapProperty(IPropertySymbol property)
+    private string WrapProperty(IPropertySymbol property, MemberHandling handling)
     {
         var type = property.Type.ToString();
         var name = property.Name;
@@ -116,8 +290,13 @@ public class SourceGenerator : IIncrementalGenerator
             refReadOnly = "ref readonly";
         }
 
+        if (handling != MemberHandling.Wrap)
+        {
+            throw new NotImplementedException();
+        }
 
         var get = property.GetMethod is not null ? $$"""
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
             get
             {
                 return {{refReturn}} {{symbol}}.{{name}};
@@ -125,6 +304,7 @@ public class SourceGenerator : IIncrementalGenerator
         """ : "";
 
         var set = property.SetMethod is not null ? $$"""
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
             set
             {
                 {{symbol}}.{{name}} = value;
@@ -152,7 +332,7 @@ public class SourceGenerator : IIncrementalGenerator
         };
     }
 
-    private string WrapMethod(IMethodSymbol method)
+    private string WrapMethod(IMethodSymbol method, MemberHandling handling)
     {
         var type = method.ReturnType.ToString();
         var name = method.Name;
@@ -168,6 +348,61 @@ public class SourceGenerator : IIncrementalGenerator
         var constraints = string.Join("\n", method.TypeParameters.Select(GetConstraintString));
         var refReturn = method.ReturnsByRef || method.ReturnsByRefReadonly ? "ref" : string.Empty;
         var refReadOnly = string.Empty;
+        var pureAttr = method.GetAttributes().Any(a => a.AttributeClass?.Name == "PureAttribute") ? "[Pure]" : string.Empty;
+        var structuralAttr = method.GetAttributes().Any(a => a.AttributeClass?.Name == "StructuralChangeAttribute") ? "[StructuralChange]" : string.Empty;
+
+        var header = string.Empty;
+        var footer = string.Empty;
+
+        if (handling == MemberHandling.GenericQuery || handling == MemberHandling.GenericScheduledQuery)
+        {
+            // unconstrained generics are components in need of write checking
+            List<string> unconstrainedGenericsList = new();
+            foreach (var tp in method.TypeParameters)
+            {
+                if (tp.HasConstructorConstraint
+                    || tp.HasNotNullConstraint
+                    || tp.HasReferenceTypeConstraint
+                    || tp.HasUnmanagedTypeConstraint
+                    || tp.HasValueTypeConstraint
+                    || tp.ConstraintTypes.Length != 0)
+                {
+                    continue;
+                }
+                unconstrainedGenericsList.Add(tp.Name);
+            }
+            string unconstrainedGenerics = string.Join(", ", unconstrainedGenericsList);
+
+            if (handling == MemberHandling.GenericQuery)
+            {
+                // For a regular generic query, we just wait on the reads and query description
+                // If these are run in a thread, it runs validation on the registration.
+                // Otherwise, it waits.
+                header = $$"""
+                    SetupQuery(Arch.Core.Group<{{unconstrainedGenerics}}>.Types, queryDescription.Reads, queryDescription.Writes);
+                    """;
+            }
+            else
+            {
+                // For a scheduled generic query, we do a whole process to register our thread as within a query.
+                // (internal)
+                header = $$"""
+                    if (dependency is null)
+                    {
+                        dependency = GetDependency(Arch.Core.Group<{{unconstrainedGenerics}}>.Types, queryDescription.Reads, queryDescription.Writes);
+                        var handle = {{refReturn}} {{symbol}}.{{name}}{{generics}}({{untypedParams}});
+                    }
+                    """;
+                footer = $$"""
+                    RegisterHandle(Arch.Core.Group<{{unconstrainedGenerics}}>.Types, queryDescription.Reads, queryDescription.Writes);
+                    return handle;
+                    """;
+            }
+        }
+        else if (handling == MemberHandling.StructuralChange)
+        {
+            header = "Synchronize();";
+        }
 
         if (method.ReturnsByRef)
         {
@@ -178,10 +413,20 @@ public class SourceGenerator : IIncrementalGenerator
             refReadOnly = "ref readonly";
         }
 
+        if (footer == string.Empty)
+        {
+            footer = $"{(type != "void" ? "return" : "")} {refReturn} {symbol}.{name}{generics}({untypedParams});";
+        }
+
         return $$"""
+            /// <inheritdoc cref="Arch.Core.World.{{name}}{{generics}}({{typedParams}})"/>
+            {{pureAttr}}
+            {{structuralAttr}}
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
             public {{@static}} {{refReadOnly}} {{type}} {{name}}{{generics}}({{typedParams}}) {{constraints}}
             {
-                {{(type != "void" ? "return" : "")}} {{refReturn}} {{symbol}}.{{name}}{{generics}}({{untypedParams}});
+                {{header}}
+                {{footer}}
             }
             """;
     }
