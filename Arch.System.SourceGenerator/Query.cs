@@ -250,6 +250,9 @@ public static class QueryUtils
             using Arch.Core.Utils;
             using ArrayExtensions = CommunityToolkit.HighPerformance.ArrayExtensions;
             using Component = Arch.Core.Utils.Component;
+
+            #nullable enable
+        
             {{(!queryMethod.IsGlobalNamespace ? $"namespace {queryMethod.Namespace} {{" : "")}}
                 partial class {{queryMethod.ClassName}}{
                     
@@ -357,6 +360,9 @@ public static class QueryUtils
             using System.Runtime.CompilerServices;
             using System.Runtime.InteropServices;
             using {{baseSystem.GenericTypeNamespace}};
+
+            #nullable enable
+                
             {{(baseSystem.Namespace != string.Empty ? $"namespace {baseSystem.Namespace} {{" : "")}}
                 partial class {{baseSystem.Name}}{
                         
